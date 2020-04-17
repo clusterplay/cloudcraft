@@ -1,0 +1,123 @@
+on: [push]
+
+env:
+  name: 'cloudcraft'
+  size: 'cx11'
+  float_ip: 95.217.25.209
+  float_ip_id: 236720
+  host_status: 'unknown'
+  HCLOUD_TOKEN: ${{ secrets.hcloud_token }}
+  authkey: ${{ secrets.cloudcraft_key }}
+  authkey_pub: ${{ secrets.cloudcraft_key_pub }}
+
+jobs:
+  create-host:
+    runs-on: ubuntu-latest
+    name: Create minecraft server
+    steps:
+
+      # prep environment
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Install depedencies
+        env:
+          hcloud_binary: https://github.com/hetznercloud/cli/releases/download/v1.16.2/hcloud-linux-amd64.tar.gz
+        run: |
+          curl -L $hcloud_binary --output ./hcloud.tar.gz
+          tar -xf ./hcloud.tar.gz
+          sudo cp ./hcloud /usr/local/bin/hcloud
+          sudo apt-get install jq
+      - name: Prepare keys
+        run: |
+          echo "${authkey}" > ~/authkey
+          chmod 600 ~/authkey
+          echo "${authkey_pub}" > ~/authkey.pub
+          chmod 644 ~/authkey.pub
+
+      # check current deployment
+      - name: Check if server exist
+        id: check-existence
+        run: |
+          if hcloud server describe $name &> /dev/null; 
+          then 
+            host_ip=$(hcloud server describe $name -o json | jq -r .public_net.ipv4.ip)
+            echo "::set-env name=host_ip::$host_ip"
+            host_status='found'
+          else 
+            host_status='missing'
+          fi
+          echo "::set-env name=host_status::$host_status"
+
+      # backup current deployment (if found)
+      - name: Stop minecraft from saving
+        id: stop-saving
+        if: env.host_status == 'found'
+        run: |
+          echo "stop minecraft from saving"
+      - name: Create hcloud snapshot
+        if: steps.stop-saving.outcome == 'success'
+        run: |
+          echo "create minecraft snapshot "
+
+      # create fresh server (if missing)
+      - name: Create server
+        if: env.host_status == 'missing'
+        id: create-server
+        run: |
+          hcloud server create \
+            --name $name \
+            --type $size \
+            --image ubuntu-18.04 \
+            --ssh-key $name
+          host_ip=$(hcloud server describe $name -o json | jq -r .public_net.ipv4.ip)
+          echo "::set-env name=host_ip::${host_ip}"
+          echo "::set-env name=host_status::created"
+      - name: Nixosify host
+        if: env.host_status == 'created'
+        uses: sparkletco/nixosify@master
+        id: nixosify
+        with:
+          target: ${{ env.host_ip }}
+          tempkey: ${{ secrets.cloudcraft_key }}
+          tempkey_pub: ${{ secrets.cloudcraft_key_pub }}
+          authkeys: ${{ env.authkey_pub }}
+
+      # manage floating ip
+      - name: Check floating ip
+        if: env.host_status == 'created' || env.host_status == 'found'
+        run: |
+          assigned_server=$(hcloud floating-ip describe $float_ip_id -o json | jq -r '.server')
+          target_server=$(hcloud server describe $name -o json | jq -r '.id')
+          if [ "$assigned_server" == "$target_server" ]; then
+            ip_status='assigned'
+          else
+            ip_status='unassigned'
+          fi
+          echo "::set-env name=ip_status::$ip_status"
+      - name: Assign floating ip
+        if: env.ip_status == 'unassigned'
+        run: |
+          source ./lib.sh
+          echo "${float_ip_id}"
+          echo "${name}"
+          hcloud floating-ip assign ${float_ip_id} ${name}
+          command="
+            nix-env -i jq
+            interface=\$(ip -j link | jq -r '.[] | select(.ifindex == 2).ifname')
+            ip addr add ${float_ip} dev \${interface}"
+          run ~/authkey "$host_ip" "$command"
+          echo "::set-env name=host_status::ready"
+
+      # restore latest snapshot
+
+      # rebuild with new configuration
+      - name: Upload configuration and rebuild
+        if: env.host_status == 'created' || env.host_status == 'found'
+        run: |
+          source ./lib.sh
+          copy ~/authkey ./configuration.nix "root@${host_ip}:/etc/nixos/configuration.nix"
+          run ~/authkey "${host_ip}" "
+            export authkeys='$authkey_pub'
+            nixos-rebuild switch
+          "
+
