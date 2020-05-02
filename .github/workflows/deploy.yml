@@ -6,6 +6,7 @@ env:
   float_ip: 95.217.25.209
   float_ip_id: 236720
   host_status: 'unknown'
+  ip_status: 'unknown'
   HCLOUD_TOKEN: ${{ secrets.hcloud_token }}
   authkey: ${{ secrets.cloudcraft_key }}
   authkey_pub: ${{ secrets.cloudcraft_key_pub }}
@@ -23,16 +24,25 @@ jobs:
         env:
           hcloud_binary: https://github.com/hetznercloud/cli/releases/download/v1.16.2/hcloud-linux-amd64.tar.gz
         run: |
+          # hcloud
           curl -L $hcloud_binary --output ./hcloud.tar.gz
           tar -xf ./hcloud.tar.gz
           sudo cp ./hcloud /usr/local/bin/hcloud
+          # mcrcon
+          git clone https://github.com/Tiiffi/mcrcon.git
+          cd mcrcon
+          make
+          sudo make install
+          # other
           sudo apt-get install jq
-      - name: Prepare keys
+      - name: Prepare secrets
         run: |
+          # ssh
           echo "${authkey}" > ~/authkey
           chmod 600 ~/authkey
           echo "${authkey_pub}" > ~/authkey.pub
           chmod 644 ~/authkey.pub
+
 
       # check current deployment
       - name: Check if server exist
@@ -52,12 +62,17 @@ jobs:
       - name: Stop minecraft from saving
         id: stop-saving
         if: env.host_status == 'found'
+        env:
+          MCRCON_HOST: ${{ env.host_ip }}
+          MCRCON_PASS: ${{ secrets.cloudcraft_rconpass }}
         run: |
-          echo "stop minecraft from saving"
+          mcrcon -w 5 "say Server is restarting!" save-all stop
       - name: Create hcloud snapshot
         if: steps.stop-saving.outcome == 'success'
         run: |
-          echo "create minecraft snapshot "
+          hcloud server poweroff $name
+          hcloud server create-image --type backup $name
+          hcloud server poweron $name
 
       # create fresh server (if missing)
       - name: Create server
@@ -113,11 +128,18 @@ jobs:
       # rebuild with new configuration
       - name: Upload configuration and rebuild
         if: env.host_status == 'created' || env.host_status == 'found'
+        env:
+          MCRCON_HOST: ${{ env.host_ip }}
+          MCRCON_PASS: ${{ secrets.cloudcraft_rconpass }}
         run: |
           source ./lib.sh
+          await 10 "serverReady ~/authkey $host_ip"
           copy ~/authkey ./configuration.nix "root@${host_ip}:/etc/nixos/configuration.nix"
-          run ~/authkey "${host_ip}" "
+          run ~/authkey "$host_ip" "
             export authkeys='$authkey_pub'
+            export rconpass='$MCRCON_PASS'
             nixos-rebuild switch
           "
+          mcrcon start
+
 

@@ -34,12 +34,12 @@
     serverProperties = {
       server-port = 43000;
       difficulty = 2;
-      gamemode = 0;
+      gamemode = 1;
       max-players = 23;
       motd = "welcome to cloudcraft!";
       white-list = true;
-      #enable-rcon = true;
-      #"rcon.password" = "hunter2";
+      enable-rcon = true;
+      "rcon.password" = (builtins.getEnv "rconpass");
     };
     whitelist = {
       IxxiePixxie = "7c473f5c-21de-494d-8165-a8f6b8f6c9fa"; 
