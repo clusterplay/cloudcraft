@@ -14,7 +14,13 @@
     device = "/dev/sda";
   };
 
-  networking.hostName = "cloudcraft"; 
+  networking = {
+    hostName = "cloudcraft"; 
+    interfaces.ens3.ipv4.addresses = [{ 
+      address = (builtins.getEnv "floating_ip"); 
+      prefixLength = 32;
+    }];
+  };
 
   # Enable the OpenSSH daemon.
   services.openssh.enable = true;
