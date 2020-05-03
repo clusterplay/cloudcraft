@@ -46,7 +46,6 @@ jobs:
 
       # check current deployment
       - name: Check if server exist
-        id: check-existence
         run: |
           if hcloud server describe $name &> /dev/null; 
           then 
@@ -57,6 +56,17 @@ jobs:
             host_status='missing'
           fi
           echo "::set-env name=host_status::$host_status"
+      - name: Check if backup exists
+        run: |
+          latest_backup_id=$(
+            hcloud image list -o noheader -l server=cloudcraft | sort -k4 | awk 'END{print $1}'
+          )
+          if [ -n "$latest" ]; then
+            echo "::set-env name=backup_status::found"
+            echo "::set-env name=latest_backup_id::$latest_backup_id"
+          else
+            echo "::set-env name=backup_status::missing"
+          fi
 
       # backup current deployment (if found)
       - name: Stop minecraft from saving
@@ -71,8 +81,12 @@ jobs:
       - name: Create hcloud snapshot
         if: steps.stop-saving.outcome == 'success'
         run: |
+          desc=$(date --iso-8601='seconds')
           hcloud server poweroff $name
-          hcloud server create-image --type backup $name
+          new_backup_id=$(
+            hcloud server create-image --type backup --description "$desc" "$name" | awk '{print $2}'
+          )
+          hcloud image add-label "$new_backup_id" server=cloudcraft
           hcloud server poweron $name
 
       # create fresh server (if missing)
@@ -80,16 +94,21 @@ jobs:
         if: env.host_status == 'missing'
         id: create-server
         run: |
+          if [ "$backup_status" == 'found' ]; then
+            image="$latest_backup_id"
+          else
+            image='ubuntu-18.04'
+          fi
           hcloud server create \
             --name $name \
             --type $size \
-            --image ubuntu-18.04 \
+            --image $image \
             --ssh-key $name
           host_ip=$(hcloud server describe $name -o json | jq -r .public_net.ipv4.ip)
           echo "::set-env name=host_ip::${host_ip}"
           echo "::set-env name=host_status::created"
       - name: Nixosify host
-        if: env.host_status == 'created'
+        if: env.host_status == 'created' && env.backup_status != 'found'
         uses: sparkletco/nixosify@master
         id: nixosify
         with:
@@ -97,6 +116,12 @@ jobs:
           tempkey: ${{ secrets.cloudcraft_key }}
           tempkey_pub: ${{ secrets.cloudcraft_key_pub }}
           authkeys: ${{ env.authkey_pub }}
+      - name: Generate config
+        if: env.host_status == 'created' && env.backup_status == 'found'
+        run: |
+          source ./lib.sh
+          await 10 "serverReady ~/authkey $host_ip"
+          run ~/authkey "$host_ip" "nixos-generate-config"
 
       # manage floating ip
       - name: Check floating ip
